@@ -29,6 +29,8 @@ SCRIPT_TAG=run-live
 # shellcheck disable=SC1091
 . "$LIB_DIR/openhud.sh"
 # shellcheck disable=SC1091
+. "$LIB_DIR/match-hud.sh"
+# shellcheck disable=SC1091
 . "$LIB_DIR/status-reporter.sh"
 
 load_env
@@ -216,6 +218,11 @@ write_spec_player_binds \
 
 # Mirror the (now fully assembled) autoexec into live_autoexec.cfg so
 # +exec live_autoexec from the launch args picks up the same binds.
+# 3d. Pull per-match HUD pack + write spec-server GSI cfg (5stack prod fork)
+say "3d. seed match HUD + spec-server GSI cfg"
+seed_match_hud || warn "  match-hud: non-fatal failure (see lines above)"
+write_spec_gsi_cfg
+
 cp "$CS2_CFG_DIR/autoexec.cfg" "$CS2_CFG_DIR/live_autoexec.cfg"
 log "  wrote $CS2_CFG_DIR/autoexec.cfg + live_autoexec.cfg"
 
