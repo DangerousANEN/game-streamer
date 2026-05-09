@@ -18,6 +18,11 @@ import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync, renameSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import {
+  runCinematic,
+  stopCinematic,
+  getCinematicStatus,
+} from "./lib/cinematic.mjs";
 
 const DISPLAY = process.env.DISPLAY ?? ":0";
 const PORT = parseInt(process.env.SPEC_PORT ?? "1350", 10);
@@ -711,9 +716,44 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // F4: cinematic camera status — what map is the flythrough on,
+    // how long has it been running, has it finished?
+    if (method === "GET" && url === "/cinematic/status") {
+      sendJson(res, 200, getCinematicStatus());
+      return;
+    }
+
     if (method !== "POST") {
       sendJson(res, 404, { error: "not found" });
       log("-> 404");
+      return;
+    }
+
+    // F4: kick off a live spectator-camera flythrough using a map's
+    // waypoint plan. The plan is loaded by name from
+    // /opt/5stack/intros/<map>.cinematic.json (hostPath override) or
+    // src/cinematic-paths/<map>.json (baked-in default). Body:
+    // { "map": "de_mirage" }. Returns 202 + status; the cinematic
+    // runs asynchronously while ximagesrc keeps capturing the cs2
+    // window into the live HLS stream.
+    if (url === "/cinematic/start") {
+      const mapName =
+        typeof body?.map === "string" ? body.map : gsiState.mapName;
+      if (!mapName) {
+        sendJson(res, 400, { error: "map required (no GSI map yet)" });
+        return;
+      }
+      sendJson(res, 202, { ok: true, map: mapName });
+      // Fire-and-forget so the HTTP request returns immediately.
+      void runCinematic(mapName, (line) =>
+        log(`cinematic: ${line}`),
+      ).catch((err) => log(`cinematic error: ${err.message ?? err}`));
+      return;
+    }
+
+    if (url === "/cinematic/stop") {
+      const stopped = stopCinematic();
+      sendJson(res, 200, { ok: true, stopped });
       return;
     }
 

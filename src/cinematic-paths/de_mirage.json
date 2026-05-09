@@ -1,0 +1,12 @@
+{
+  "map": "de_mirage",
+  "duration_seconds": 24,
+  "waypoints": [
+    { "name": "T spawn overlook", "pos": [-2300, -1100, 250], "ang": [25, -25, 0], "hold_seconds": 1 },
+    { "name": "Mid alley above",  "pos": [-200,  -800, 480], "ang": [40, 90, 0],  "hold_seconds": 1 },
+    { "name": "A site over palace","pos": [1300,  -100, 320], "ang": [35, 200, 0], "hold_seconds": 1 },
+    { "name": "Connector apex",   "pos": [400,    300, 500], "ang": [55, 270, 0], "hold_seconds": 1 },
+    { "name": "B site over apps", "pos": [-1700, -250, 280], "ang": [30, 0, 0],   "hold_seconds": 1 },
+    { "name": "CT spawn overlook","pos": [-200,  1100, 320], "ang": [25, 180, 0], "hold_seconds": 1 }
+  ]
+}

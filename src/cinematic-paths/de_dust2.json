@@ -1,0 +1,12 @@
+{
+  "map": "de_dust2",
+  "duration_seconds": 24,
+  "waypoints": [
+    { "name": "T spawn",       "pos": [-1450, 2000, 200], "ang": [25, -45, 0], "hold_seconds": 1 },
+    { "name": "Mid doors",     "pos": [-200,  1700, 350], "ang": [35, 0, 0],   "hold_seconds": 1 },
+    { "name": "Long over pit", "pos": [800,   2400, 320], "ang": [30, 180, 0], "hold_seconds": 1 },
+    { "name": "A site",        "pos": [1200,  2400, 400], "ang": [40, 270, 0], "hold_seconds": 1 },
+    { "name": "CT spawn",      "pos": [200,   400,  300], "ang": [25, 90, 0],  "hold_seconds": 1 },
+    { "name": "B site",        "pos": [-1700, 2620, 280], "ang": [30, 90, 0],  "hold_seconds": 1 }
+  ]
+}

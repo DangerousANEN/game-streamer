@@ -1,0 +1,12 @@
+{
+  "map": "de_inferno",
+  "duration_seconds": 24,
+  "waypoints": [
+    { "name": "T spawn overlook", "pos": [-1100, 600,  400], "ang": [25, 30, 0],  "hold_seconds": 1 },
+    { "name": "Banana entrance", "pos": [-200,  1500, 420], "ang": [30, 90, 0],  "hold_seconds": 1 },
+    { "name": "B site",          "pos": [-200,  2700, 320], "ang": [30, 180, 0], "hold_seconds": 1 },
+    { "name": "Mid market",      "pos": [800,   1800, 500], "ang": [45, 270, 0], "hold_seconds": 1 },
+    { "name": "A site over short","pos": [2000,  500,  300], "ang": [25, 200, 0], "hold_seconds": 1 },
+    { "name": "CT spawn",        "pos": [1600,  -300, 350], "ang": [20, 90, 0],  "hold_seconds": 1 }
+  ]
+}

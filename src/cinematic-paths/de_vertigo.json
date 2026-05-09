@@ -1,0 +1,12 @@
+{
+  "map": "de_vertigo",
+  "duration_seconds": 24,
+  "waypoints": [
+    { "name": "T spawn (top floor)",  "pos": [-1700, 1500, 11900], "ang": [25, -90, 0], "hold_seconds": 1 },
+    { "name": "Above A site",         "pos": [-1700, 1240, 11800], "ang": [50, 90, 0],  "hold_seconds": 1 },
+    { "name": "Mid (top floor)",      "pos": [-1100, 1300, 11800], "ang": [40, 0, 0],   "hold_seconds": 1 },
+    { "name": "Above B site (lower)", "pos": [-380,  1330, 11500], "ang": [55, 180, 0], "hold_seconds": 1 },
+    { "name": "B ramp",               "pos": [-380,  900,  11500], "ang": [25, 0, 0],   "hold_seconds": 1 },
+    { "name": "CT spawn",             "pos": [-100,  1700, 11800], "ang": [25, 270, 0], "hold_seconds": 1 }
+  ]
+}

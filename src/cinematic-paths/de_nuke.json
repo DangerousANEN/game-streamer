@@ -1,0 +1,12 @@
+{
+  "map": "de_nuke",
+  "duration_seconds": 24,
+  "waypoints": [
+    { "name": "Outside silo",   "pos": [1100, -700, 480],  "ang": [25, 180, 0], "hold_seconds": 1 },
+    { "name": "Outside ramp",   "pos": [400,  -1000, 500], "ang": [30, 90, 0],  "hold_seconds": 1 },
+    { "name": "Above A site",   "pos": [-870, -670, 200],  "ang": [55, 0, 0],   "hold_seconds": 1 },
+    { "name": "Heaven catwalk", "pos": [-450, -700, 350],  "ang": [40, 270, 0], "hold_seconds": 1 },
+    { "name": "Above B site",   "pos": [-1085, -930, -380],"ang": [55, 90, 0],  "hold_seconds": 1 },
+    { "name": "Yard overlook",  "pos": [600,  -200, 600],  "ang": [25, 200, 0], "hold_seconds": 1 }
+  ]
+}
