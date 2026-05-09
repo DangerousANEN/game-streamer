@@ -228,6 +228,12 @@ write_spec_gsi_cfg
 cp "$CS2_CFG_DIR/autoexec.cfg" "$CS2_CFG_DIR/live_autoexec.cfg"
 log "  wrote $CS2_CFG_DIR/autoexec.cfg + live_autoexec.cfg"
 
+# Pre-create empty so cs2's BACKSPACE bind (`exec 5stack_exec`) doesn't
+# error before spec-server::execCfgCommand has populated the file. Same
+# pattern as run-demo.sh; required now that live mode also drives the
+# console through this path (cinematic flythrough, /spec/connect).
+: > "$CS2_CFG_DIR/5stack_exec.cfg"
+
 # CS2 dlopen()s libpangoft2-1.0.so without the .0 suffix; pre-link.
 for base in libpangoft2-1.0 libpango-1.0; do
   if [ ! -e "$CS2_DIR/game/bin/linuxsteamrt64/${base}.so" ] \
@@ -425,20 +431,27 @@ if [ "$CS2_CONNECT_MODE" != "playcast" ]; then
     # for ~25-40s even when +connect was honoured.
     sleep 30
     for attempt in 1 2 3 4; do
-      gsi_age=$(curl -fsS -m 3 "${spec_url}/demo/state" 2>/dev/null \
+      # GSI alone is not enough — cs2 sends a heartbeat every 10s even
+      # at the main menu (just with map_name=null). We need an event
+      # whose `map.name` is populated to confirm cs2 is on a server.
+      state_summary=$(curl -fsS -m 3 "${spec_url}/demo/state" 2>/dev/null \
         | python3 -c 'import json,sys
 try:
   d = json.load(sys.stdin)
   g = d.get("gsi") or {}
-  print(g.get("last_received_ms_ago", -1))
+  print(f"{g.get(\"map_name\") or \"\"}|{g.get(\"map_phase\") or \"\"}|{g.get(\"last_received_ms_ago\", -1)}")
 except Exception:
-  print(-1)' 2>/dev/null) || gsi_age=-1
-      if [ "$gsi_age" != "-1" ] && [ "$gsi_age" -ge 0 ] 2>/dev/null \
+  print("||-1")' 2>/dev/null) || state_summary="||-1"
+      map_name=${state_summary%%|*}
+      rest=${state_summary#*|}
+      map_phase=${rest%%|*}
+      gsi_age=${rest#*|}
+      if [ -n "$map_name" ] && [ "$gsi_age" -ge 0 ] 2>/dev/null \
          && [ "$gsi_age" -lt 30000 ]; then
-        log "  gsi fresh (last_received_ms_ago=$gsi_age) — cs2 is in-game, no reconnect needed"
+        log "  gsi fresh + on map ($map_name, phase=$map_phase, age=${gsi_age}ms) — cs2 is in-game, no reconnect needed"
         exit 0
       fi
-      log "  cs2 GSI cold (gsi_age=$gsi_age, attempt=$attempt/4) — re-issuing connect ${CS2_CONNECT_ADDR}"
+      log "  cs2 still at main menu (map=\"$map_name\" phase=\"$map_phase\" gsi_age=$gsi_age, attempt=$attempt/4) — re-issuing connect ${CS2_CONNECT_ADDR}"
       curl -fsS -m 5 -X POST -H 'content-type: application/json' \
         --data "$(printf '{"addr":"%s","password":"%s"}' \
           "$CS2_CONNECT_ADDR" "$CS2_CONNECT_PASSWORD")" \
@@ -448,7 +461,7 @@ except Exception:
       printf '\n'
       sleep 20
     done
-    warn "  gsi stayed cold after 4 reconnect attempts — viewers will see main menu (check server reachability + steam +connect handling)"
+    warn "  cs2 stayed on main menu after 4 reconnect attempts — viewers will see main menu (check server reachability + BACKSPACE bind + spec-server logs)"
   ) >>"$LOG_DIR/connect-watchdog.log" 2>&1 &
   log "  connect-watchdog started (background pid=$!) — see $LOG_DIR/connect-watchdog.log"
 fi

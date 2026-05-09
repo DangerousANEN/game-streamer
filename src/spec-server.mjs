@@ -787,22 +787,20 @@ const server = createServer(async (req, res) => {
         log("-> 400 connect bad addr");
         return;
       }
-      const cmds = [];
-      if (password) {
-        // Drop quotes — cs2's parser doesn't quote inside cfg `exec`,
-        // and our match passwords are uuids so they have none anyway.
-        cmds.push(`password ${password.replace(/[\r\n";]/g, "")}`);
-      }
-      cmds.push(`connect ${addr}`);
-      let ok = true;
-      for (const cmd of cmds) {
-        // Sequential: connect must follow the password on cs2's
-        // command queue so the server accepts the join.
-        if (!(await execCfgCommand(cmd))) {
-          ok = false;
-          break;
-        }
-      }
+      // Strip quotes / newlines / shell-meta from the password so it
+      // can't bust out of the cfg line. UUID match passwords don't
+      // contain any of these, but be defensive in case the schema
+      // changes later.
+      const cleanPassword = password.replace(/[\r\n";]/g, "");
+      // execCfgCommand splits on `;` into separate lines in the same
+      // 5stack_exec.cfg write — cs2 then `exec`s the file once and
+      // both commands run on the same engine tick. Issuing them as
+      // *two* execCfgCommand calls would have the second write
+      // (connect) overwrite the first (password) before cs2 saw it.
+      const combined = cleanPassword
+        ? `password ${cleanPassword}; connect ${addr}`
+        : `connect ${addr}`;
+      const ok = await execCfgCommand(combined);
       sendJson(
         res,
         ok ? 200 : 503,

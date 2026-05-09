@@ -313,6 +313,12 @@ bind "F2" "spec_prev"
 bind "F3" "+jump"
 bind "F4" "spec_autodirector 1; spec_mode 5"
 bind "F5" "spec_autodirector 0"
+// BACKSPACE → exec 5stack_exec is spec-server's exec-cfg path for
+// arbitrary console commands (cinematic setpos/setang, post-applaunch
+// reconnect, etc.). Hard-coded in spec-server.mjs::EXEC_CFG_KEY — keep
+// the binding identical in live and demo mode so spec-server has a
+// single keypress vehicle in both flows.
+bind "BACKSPACE" "exec 5stack_exec"
 EOF
 }
 
