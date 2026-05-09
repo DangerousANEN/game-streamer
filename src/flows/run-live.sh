@@ -31,6 +31,8 @@ SCRIPT_TAG=run-live
 # shellcheck disable=SC1091
 . "$LIB_DIR/match-hud.sh"
 # shellcheck disable=SC1091
+. "$LIB_DIR/flythrough.sh"
+# shellcheck disable=SC1091
 . "$LIB_DIR/status-reporter.sh"
 
 load_env
@@ -405,6 +407,14 @@ start_capture "$MATCH_ID" "$FPS" "$VIDEO_KBPS" false 1 \
 # HLS URL is set by the API at row-insert time on `link`.
 report_status status=live \
   "stream_url=${MEDIAMTX_SRT_BASE}?streamid=publish:${MATCH_ID}"
+
+# 6b. Pre-match map flythrough (5stack prod fork F4). Plays AFTER capture
+# is up so the flythrough is visible in the live HLS stream. mpv runs
+# fullscreen + ontop; ximagesrc captures the composite. Non-fatal: any
+# failure (no binding for map, mpv missing, hostPath empty) just falls
+# through and viewers see cs2's warmup state instead.
+say "6b. play map flythrough during warmup"
+play_flythrough || warn "  flythrough: non-fatal failure (see lines above)"
 
 say "done"
 log "watch:    https://${GAME_STREAM_DOMAIN}/${MATCH_ID}/"
