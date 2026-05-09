@@ -1,0 +1,12 @@
+{
+  "map": "de_ancient",
+  "duration_seconds": 24,
+  "waypoints": [
+    { "name": "T spawn",          "pos": [1700, 1700,  200], "ang": [25, -135, 0], "hold_seconds": 1 },
+    { "name": "Mid plaza",        "pos": [400,  600,   400], "ang": [50, -90, 0],  "hold_seconds": 1 },
+    { "name": "A site overlook",  "pos": [-1100,200,   200], "ang": [30, 0, 0],    "hold_seconds": 1 },
+    { "name": "Connector ramp",   "pos": [200,  900,   500], "ang": [55, 90, 0],   "hold_seconds": 1 },
+    { "name": "B site overlook",  "pos": [1600, 1500, -90],  "ang": [30, 180, 0],  "hold_seconds": 1 },
+    { "name": "CT spawn",         "pos": [-1200,2200,  150], "ang": [25, 90, 0],   "hold_seconds": 1 }
+  ]
+}

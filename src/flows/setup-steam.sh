@@ -64,6 +64,8 @@ OPENHUD_DEFERRED=0
 # renders all still want the HUD.
 if [ "${CLIP_BATCH_MODE:-0}" = "1" ]; then
   log "CLIP_BATCH_MODE=1 — skipping OpenHud (auto-highlights render without overlay)"
+elif [ "${OPENHUD_DISABLED:-0}" = "1" ]; then
+  log "OPENHUD_DISABLED=1 — raw stream (HUD will be rendered by OBS Browser Source instead)"
 elif [ -x "$OPENHUD_BIN" ]; then
   start_picom || warn "continuing without picom (HUD background won't be transparent)"
   start_openhud

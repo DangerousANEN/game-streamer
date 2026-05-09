@@ -18,6 +18,11 @@ import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync, renameSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import {
+  runCinematic,
+  stopCinematic,
+  getCinematicStatus,
+} from "./lib/cinematic.mjs";
 
 const DISPLAY = process.env.DISPLAY ?? ":0";
 const PORT = parseInt(process.env.SPEC_PORT ?? "1350", 10);
@@ -121,7 +126,138 @@ const gsiState = {
   teamTName: null,
   teamCtScore: 0,
   teamTScore: 0,
+  // Phase countdown info from GSI's `phase_countdowns` block. Used by
+  // the OBS operator-view HUD to render a round-start / freeze /
+  // bomb-detonation / defuse countdown without re-decoding the demo.
+  // Shape: { phase: "freezetime"|"live"|"over"|null, phase_ends_in_s: number|null }
+  phase: null,
+  phaseEndsInS: null,
+  // Bomb state (planted/defusing) — exposed for HUDs that draw a
+  // dedicated bomb timer. Mirrors GSI's `bomb` block.
+  // Shape: { state: "planted"|"defusing"|null, countdown_s: number|null }
+  bombState: null,
+  bombCountdownS: null,
 };
+
+// Per-player snapshot enriched from `allplayers[*].state` for the
+// operator-view HUD (money, equip_value, kills/deaths/per-round). Held
+// separately from `specSlots` so the existing keyboard/click pathway
+// (which only cares about slot+steam_id+team+alive) doesn't pay the
+// extra serialization cost. Resets every GSI tick.
+let specPlayersExt = [];
+
+// ── F3: round highlight detection ──────────────────────────────────
+// Track per-player kill totals from GSI allplayers.match_stats.kills.
+// On round_phase "live"→"over" we compute deltas (kills THIS round)
+// and flag highlights (2K/3K/4K/Ace). During freeze time, auto-spec
+// the round MVP and POST the highlight to the api for the panel.
+const highlightState = {
+  // Map<steamId, {kills, deaths, name, team}> snapshot taken at the
+  // START of each round (round_phase "freezetime"→"live" transition).
+  roundStartStats: new Map(),
+  // Array of detected highlights for the current match, most recent
+  // first. Capped at 200 entries.
+  highlights: [],
+  // Prevent double-firing on the same round.
+  lastProcessedRound: -1,
+};
+
+function snapshotRoundStartStats(allPlayers) {
+  highlightState.roundStartStats.clear();
+  if (!allPlayers || typeof allPlayers !== "object") return;
+  for (const [steamId, p] of Object.entries(allPlayers)) {
+    if (!p || typeof p !== "object") continue;
+    highlightState.roundStartStats.set(steamId, {
+      kills: Number(p.match_stats?.kills ?? 0),
+      deaths: Number(p.match_stats?.deaths ?? 0),
+      name: typeof p.name === "string" ? p.name : steamId,
+      team: p.team === "T" || p.team === "CT" ? p.team : null,
+    });
+  }
+}
+
+function detectRoundHighlights(roundNumber, allPlayers) {
+  if (!allPlayers || typeof allPlayers !== "object") return [];
+  if (highlightState.roundStartStats.size === 0) return [];
+
+  const detected = [];
+  const teamSize = {};
+  for (const [, p] of Object.entries(allPlayers)) {
+    if (!p || typeof p !== "object") continue;
+    const t = p.team;
+    if (t === "T" || t === "CT") teamSize[t] = (teamSize[t] ?? 0) + 1;
+  }
+
+  for (const [steamId, p] of Object.entries(allPlayers)) {
+    if (!p || typeof p !== "object") continue;
+    const prev = highlightState.roundStartStats.get(steamId);
+    if (!prev) continue;
+    const killsThisRound =
+      Number(p.match_stats?.kills ?? 0) - prev.kills;
+    if (killsThisRound < 2) continue;
+
+    const enemyTeam = prev.team === "CT" ? "T" : "CT";
+    const enemyCount = teamSize[enemyTeam] ?? 5;
+    const isAce = killsThisRound >= enemyCount;
+
+    let label;
+    if (isAce) label = "ace";
+    else if (killsThisRound >= 4) label = "4k";
+    else if (killsThisRound === 3) label = "3k";
+    else label = "2k";
+
+    detected.push({
+      round: roundNumber,
+      steam_id: steamId,
+      player_name: prev.name,
+      team: prev.team,
+      kills: killsThisRound,
+      label,
+      timestamp: new Date().toISOString(),
+    });
+  }
+  // Sort by kill count descending so the best highlight is first.
+  detected.sort((a, b) => b.kills - a.kills);
+  return detected;
+}
+
+async function postHighlightsToApi(highlights) {
+  const matchId = process.env.MATCH_ID;
+  const apiBase = process.env.STATUS_API_BASE ?? process.env.API_BASE;
+  if (!matchId || !apiBase || highlights.length === 0) return;
+  try {
+    await fetch(`${apiBase}/matches/${matchId}/highlights`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ highlights }),
+      signal: AbortSignal.timeout(5_000),
+    });
+  } catch (e) {
+    process.stderr.write(
+      `[spec-server] POST highlights failed: ${e.message}\n`,
+    );
+  }
+}
+
+async function autoSpecHighlightPlayer(highlights) {
+  // During freeze time, spec the round MVP so the camera is on them
+  // when the next round starts. Find their observer_slot and fire
+  // spec_player via xdotool key.
+  if (highlights.length === 0) return;
+  const mvpSteamId = highlights[0].steam_id;
+  const slot = gsiState.specSlots.find((s) => s.steam_id === mvpSteamId);
+  if (!slot) return;
+  const digitKey = slot.slot <= 9 ? String(slot.slot) : "0";
+  try {
+    await sendKey(digitKey);
+    process.stderr.write(
+      `[spec-server] highlights: auto-spec player ${highlights[0].player_name} (slot ${slot.slot})\n`,
+    );
+  } catch {
+    // Non-fatal: cs2 might not have focus, or the slot key isn't bound
+    // yet — just keep going so the next round still gets evaluated.
+  }
+}
 
 // One-shot "tell the api the demo is actually playing now" beacon
 // + hide the auto-opened demoui Panorama panel. Fires on the first
@@ -574,10 +710,15 @@ const server = createServer(async (req, res) => {
               spectated_steam_id: gsiState.spectatedSteamId,
               last_received_ms_ago: Date.now() - gsiState.lastReceivedMs,
               spec_slots: gsiState.specSlots,
+              spec_players_ext: specPlayersExt,
               team_ct_name: gsiState.teamCtName,
               team_t_name: gsiState.teamTName,
               team_ct_score: gsiState.teamCtScore,
               team_t_score: gsiState.teamTScore,
+              phase: gsiState.phase,
+              phase_ends_in_s: gsiState.phaseEndsInS,
+              bomb_state: gsiState.bombState,
+              bomb_countdown_s: gsiState.bombCountdownS,
               // True once the post-GSI demoui-toggle has been
               // delivered to cs2. The batch-highlights pod waits on
               // this before starting its first capture so we don't
@@ -589,18 +730,106 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // F3: query in-memory highlights detected by GSI round tracking.
+    if (method === "GET" && url === "/highlights") {
+      sendJson(res, 200, {
+        highlights: highlightState.highlights,
+        last_processed_round: highlightState.lastProcessedRound,
+      });
+      return;
+    }
+
+    // F4: cinematic camera status — what map is the flythrough on,
+    // how long has it been running, has it finished?
+    if (method === "GET" && url === "/cinematic/status") {
+      sendJson(res, 200, getCinematicStatus());
+      return;
+    }
+
     if (method !== "POST") {
       sendJson(res, 404, { error: "not found" });
       log("-> 404");
       return;
     }
 
+    // Parse the request body up-front for *all* POST handlers below so
+    // that no handler hits the temporal-dead-zone of a `let body` that
+    // is only declared further down in the same try-block.
     let body;
     try {
       body = await readJsonBody(req);
     } catch {
       sendJson(res, 400, { error: "invalid json" });
       log("-> 400 invalid json");
+      return;
+    }
+
+    // F4: kick off a live spectator-camera flythrough using a map's
+    // waypoint plan. The plan is loaded by name from
+    // /opt/5stack/intros/<map>.cinematic.json (hostPath override) or
+    // src/cinematic-paths/<map>.json (baked-in default). Body:
+    // { "map": "de_mirage" }. Returns 202 + status; the cinematic
+    // runs asynchronously while ximagesrc keeps capturing the cs2
+    // window into the live HLS stream.
+    if (url === "/cinematic/start") {
+      const mapName =
+        typeof body?.map === "string" ? body.map : gsiState.mapName;
+      if (!mapName) {
+        sendJson(res, 400, { error: "map required (no GSI map yet)" });
+        return;
+      }
+      sendJson(res, 202, { ok: true, map: mapName });
+      // Fire-and-forget so the HTTP request returns immediately.
+      void runCinematic(mapName, (line) =>
+        log(`cinematic: ${line}`),
+      ).catch((err) => log(`cinematic error: ${err.message ?? err}`));
+      return;
+    }
+
+    if (url === "/cinematic/stop") {
+      const stopped = stopCinematic();
+      sendJson(res, 200, { ok: true, stopped });
+      return;
+    }
+
+    // F4-related fix: Steam occasionally drops the +connect launch
+    // arg when -applaunch hands off to an already-running Steam
+    // process; cs2 then sits at the main menu and the live stream
+    // shows the menu instead of the game. run-live.sh polls the GSI
+    // freshness in /demo/state and re-issues `connect <addr>` /
+    // `password <pwd>` through this endpoint when GSI stays cold for
+    // too long. Body: { "addr": "1.2.3.4:27015", "password": "..." }.
+    if (url === "/spec/connect") {
+      const addr = typeof body?.addr === "string" ? body.addr.trim() : "";
+      const password =
+        typeof body?.password === "string" ? body.password : "";
+      // Match cs2's `<host>:<port>` form. Reject anything else so a
+      // typo doesn't leak shell-meta into execCfgCommand.
+      if (!/^[A-Za-z0-9.\-]+:\d{1,5}$/.test(addr)) {
+        sendJson(res, 400, { error: "addr (host:port) required" });
+        log("-> 400 connect bad addr");
+        return;
+      }
+      // Strip quotes / newlines / shell-meta from the password so it
+      // can't bust out of the cfg line. UUID match passwords don't
+      // contain any of these, but be defensive in case the schema
+      // changes later.
+      const cleanPassword = password.replace(/[\r\n";]/g, "");
+      // execCfgCommand splits on `;` into separate lines in the same
+      // 5stack_exec.cfg write — cs2 then `exec`s the file once and
+      // both commands run on the same engine tick. Issuing them as
+      // *two* execCfgCommand calls would have the second write
+      // (connect) overwrite the first (password) before cs2 saw it.
+      const combined = cleanPassword
+        ? `password ${cleanPassword}; connect ${addr}`
+        : `connect ${addr}`;
+      const ok = await execCfgCommand(combined);
+      sendJson(
+        res,
+        ok ? 200 : 503,
+        ok ? { ok, addr } : { error: "cs2 not running" },
+      );
+      log(`-> ${ok ? 200 : 503} connect ${addr}`);
       return;
     }
 
@@ -915,6 +1144,28 @@ const server = createServer(async (req, res) => {
         typeof map?.team_t?.name === "string" ? map.team_t.name : null;
       gsiState.teamCtScore = Number(map?.team_ct?.score ?? 0) || 0;
       gsiState.teamTScore = Number(map?.team_t?.score ?? 0) || 0;
+      // Phase + countdown for OBS operator-view HUD.
+      const pc = body?.phase_countdowns ?? null;
+      gsiState.phase =
+        typeof pc?.phase === "string" ? pc.phase : null;
+      const phaseEndsRaw = pc?.phase_ends_in;
+      gsiState.phaseEndsInS =
+        typeof phaseEndsRaw === "string"
+          ? Number.parseFloat(phaseEndsRaw) || 0
+          : typeof phaseEndsRaw === "number"
+            ? phaseEndsRaw
+            : null;
+      // Bomb state — string fields per cs2 GSI.
+      const bomb = body?.bomb ?? null;
+      gsiState.bombState =
+        typeof bomb?.state === "string" ? bomb.state : null;
+      const bombCountdownRaw = bomb?.countdown;
+      gsiState.bombCountdownS =
+        typeof bombCountdownRaw === "string"
+          ? Number.parseFloat(bombCountdownRaw) || 0
+          : typeof bombCountdownRaw === "number"
+            ? bombCountdownRaw
+            : null;
       // Build the slot snapshot. `allplayers` is keyed by steamid64 and
       // each entry has `observer_slot` — in CS2 GSI this is 0-indexed,
       // i.e. the player on key "1" reports observer_slot=0, key "2"
@@ -923,6 +1174,7 @@ const server = createServer(async (req, res) => {
       // simply add 1 to land on the 1..10 numbering the buttons fire.
       if (allPlayers && typeof allPlayers === "object") {
         const slots = [];
+        const ext = [];
         for (const [steamId, p] of Object.entries(allPlayers)) {
           if (!p || typeof p !== "object") continue;
           const raw = p.observer_slot;
@@ -930,7 +1182,8 @@ const server = createServer(async (req, res) => {
           const slot = raw + 1;
           if (slot < 1 || slot > 12) continue;
           const team = p.team === "T" || p.team === "CT" ? p.team : null;
-          const health = Number(p.state?.health ?? 0);
+          const state = p.state ?? {};
+          const health = Number(state.health ?? 0);
           slots.push({
             slot,
             steam_id: steamId,
@@ -939,10 +1192,92 @@ const server = createServer(async (req, res) => {
             alive: health > 0,
             health,
           });
+          // weapons[*] = { name, paintkit, type, state, ammo_clip,... }
+          // We extract just the weapon names + the "active" weapon for
+          // the operator HUD; ammo and paintkit aren't useful overlay
+          // data (and bloat the JSON).
+          const weapons = [];
+          let activeWeapon = null;
+          if (p.weapons && typeof p.weapons === "object") {
+            for (const wRaw of Object.values(p.weapons)) {
+              if (!wRaw || typeof wRaw !== "object") continue;
+              const wName =
+                typeof wRaw.name === "string" ? wRaw.name : null;
+              if (!wName) continue;
+              const wType =
+                typeof wRaw.type === "string" ? wRaw.type : null;
+              weapons.push({ name: wName, type: wType });
+              if (wRaw.state === "active") {
+                activeWeapon = wName;
+              }
+            }
+          }
+          const matchStats = p.match_stats ?? {};
+          ext.push({
+            slot,
+            steam_id: steamId,
+            name: typeof p.name === "string" ? p.name : null,
+            team,
+            alive: health > 0,
+            health,
+            armor: Number(state.armor ?? 0),
+            helmet: !!state.helmet,
+            money: Number(state.money ?? 0),
+            equip_value: Number(state.equip_value ?? 0),
+            round_kills: Number(state.round_kills ?? 0),
+            round_killhs: Number(state.round_killhs ?? 0),
+            kills: Number(matchStats.kills ?? 0),
+            assists: Number(matchStats.assists ?? 0),
+            deaths: Number(matchStats.deaths ?? 0),
+            mvps: Number(matchStats.mvps ?? 0),
+            score: Number(matchStats.score ?? 0),
+            weapons,
+            active_weapon: activeWeapon,
+            defusekit: !!state.defusekit,
+          });
         }
         slots.sort((a, b) => a.slot - b.slot);
+        ext.sort((a, b) => a.slot - b.slot);
         gsiState.specSlots = slots;
+        specPlayersExt = ext;
       }
+      // F3 highlight detection: anchor stats at the start of each round
+      // and detect multi-kills when the round ends. Both transitions
+      // need fresh allplayers from the current GSI tick (`body`).
+      if (
+        prevRoundPhase !== "live" &&
+        gsiState.roundPhase === "live" &&
+        allPlayers
+      ) {
+        snapshotRoundStartStats(allPlayers);
+      }
+      if (
+        prevRoundPhase === "live" &&
+        gsiState.roundPhase === "over" &&
+        allPlayers &&
+        gsiState.roundNumber !== highlightState.lastProcessedRound
+      ) {
+        const detected = detectRoundHighlights(
+          gsiState.roundNumber ?? -1,
+          allPlayers,
+        );
+        highlightState.lastProcessedRound = gsiState.roundNumber ?? -1;
+        if (detected.length > 0) {
+          highlightState.highlights = [
+            ...detected,
+            ...highlightState.highlights,
+          ].slice(0, 200);
+          log(
+            `  highlights round ${gsiState.roundNumber}: ` +
+              detected
+                .map((h) => `${h.label}(${h.player_name}/${h.kills}k)`)
+                .join(" "),
+          );
+          void postHighlightsToApi(detected);
+          void autoSpecHighlightPlayer(detected);
+        }
+      }
+
       bumpActivity();
       sendJson(res, 200, { ok: true });
       // Only fire the "playing" beacon once we have REAL game data.

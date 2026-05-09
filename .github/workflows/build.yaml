@@ -4,7 +4,12 @@ on:
   push:
     branches:
       - "main"
+      - "devin/**"
   workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
 
 jobs:
   build-push-and-release:
@@ -27,16 +32,16 @@ jobs:
         with:
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/game-streamer:latest
-            ghcr.io/${{ github.repository_owner }}/game-streamer:${{ github.sha }}
+            ghcr.io/dangerousanen/game-streamer:latest
+            ghcr.io/dangerousanen/game-streamer:${{ github.sha }}
           # Registry-backed cache: a dedicated :buildcache tag on ghcr stores
           # the layer cache across runs (no 10GB GHA-cache ceiling, survives
           # branch/PR boundaries). First build is a full rebuild; every
           # subsequent build reuses unchanged apt/steamcmd/CS2 layers.
           cache-from: |
-            type=registry,ref=ghcr.io/${{ github.repository_owner }}/game-streamer:buildcache
+            type=registry,ref=ghcr.io/dangerousanen/game-streamer:buildcache
           cache-to: |
-            type=registry,ref=ghcr.io/${{ github.repository_owner }}/game-streamer:buildcache,mode=max
+            type=registry,ref=ghcr.io/dangerousanen/game-streamer:buildcache,mode=max
 
       - name: Delete Package Versions
         uses: actions/delete-package-versions@v5

@@ -29,6 +29,10 @@ SCRIPT_TAG=run-live
 # shellcheck disable=SC1091
 . "$LIB_DIR/openhud.sh"
 # shellcheck disable=SC1091
+. "$LIB_DIR/match-hud.sh"
+# shellcheck disable=SC1091
+. "$LIB_DIR/flythrough.sh"
+# shellcheck disable=SC1091
 . "$LIB_DIR/status-reporter.sh"
 
 load_env
@@ -216,8 +220,23 @@ write_spec_player_binds \
 
 # Mirror the (now fully assembled) autoexec into live_autoexec.cfg so
 # +exec live_autoexec from the launch args picks up the same binds.
+# 3d. Pull per-match HUD pack + write spec-server GSI cfg (5stack prod fork)
+say "3d. seed match HUD + spec-server GSI cfg"
+if [ "${OPENHUD_DISABLED:-0}" = "1" ]; then
+  log "  match-hud: OPENHUD_DISABLED=1 — skipping HUD pack download"
+else
+  seed_match_hud || warn "  match-hud: non-fatal failure (see lines above)"
+fi
+write_spec_gsi_cfg
+
 cp "$CS2_CFG_DIR/autoexec.cfg" "$CS2_CFG_DIR/live_autoexec.cfg"
 log "  wrote $CS2_CFG_DIR/autoexec.cfg + live_autoexec.cfg"
+
+# Pre-create empty so cs2's BACKSPACE bind (`exec 5stack_exec`) doesn't
+# error before spec-server::execCfgCommand has populated the file. Same
+# pattern as run-demo.sh; required now that live mode also drives the
+# console through this path (cinematic flythrough, /spec/connect).
+: > "$CS2_CFG_DIR/5stack_exec.cfg"
 
 # CS2 dlopen()s libpangoft2-1.0.so without the .0 suffix; pre-link.
 for base in libpangoft2-1.0 libpango-1.0; do
@@ -398,6 +417,66 @@ start_capture "$MATCH_ID" "$FPS" "$VIDEO_KBPS" false 1 \
 # HLS URL is set by the API at row-insert time on `link`.
 report_status status=live \
   "stream_url=${MEDIAMTX_SRT_BASE}?streamid=publish:${MATCH_ID}"
+
+# 6a. Reconnect-watchdog: if Steam dropped the +connect launch arg
+# (it occasionally does when -applaunch hands off to an already-running
+# Steam) cs2 sits at the main menu and viewers see the menu instead of
+# the game. We detect that by polling spec-server's GSI freshness (no
+# events => not in a game) and re-issuing the connect via the new
+# /spec/connect endpoint. Bounded retries so we don't spam an actual
+# server-down situation.
+if [ "$CS2_CONNECT_MODE" != "playcast" ]; then
+  (
+    SCRIPT_TAG=connect-watchdog
+    spec_port="${SPEC_SERVER_PORT:-1350}"
+    spec_url="http://127.0.0.1:${spec_port}"
+    # Give cs2 a generous head-start before second-guessing it — a
+    # cold cache + shader pre-cache can keep a fresh pod on the menu
+    # for ~25-40s even when +connect was honoured.
+    sleep 30
+    for attempt in 1 2 3 4; do
+      # GSI alone is not enough — cs2 sends a heartbeat every 10s even
+      # at the main menu (just with map_name=null). We need an event
+      # whose `map.name` is populated to confirm cs2 is on a server.
+      state_summary=$(curl -fsS -m 3 "${spec_url}/demo/state" 2>/dev/null \
+        | python3 -c 'import json,sys
+try:
+  d = json.load(sys.stdin)
+  g = d.get("gsi") or {}
+  print(f"{g.get(\"map_name\") or \"\"}|{g.get(\"map_phase\") or \"\"}|{g.get(\"last_received_ms_ago\", -1)}")
+except Exception:
+  print("||-1")' 2>/dev/null) || state_summary="||-1"
+      map_name=${state_summary%%|*}
+      rest=${state_summary#*|}
+      map_phase=${rest%%|*}
+      gsi_age=${rest#*|}
+      if [ -n "$map_name" ] && [ "$gsi_age" -ge 0 ] 2>/dev/null \
+         && [ "$gsi_age" -lt 30000 ]; then
+        log "  gsi fresh + on map ($map_name, phase=$map_phase, age=${gsi_age}ms) — cs2 is in-game, no reconnect needed"
+        exit 0
+      fi
+      log "  cs2 still at main menu (map=\"$map_name\" phase=\"$map_phase\" gsi_age=$gsi_age, attempt=$attempt/4) — re-issuing connect ${CS2_CONNECT_ADDR}"
+      curl -fsS -m 5 -X POST -H 'content-type: application/json' \
+        --data "$(printf '{"addr":"%s","password":"%s"}' \
+          "$CS2_CONNECT_ADDR" "$CS2_CONNECT_PASSWORD")" \
+        "${spec_url}/spec/connect" \
+        | head -c 200 \
+        | sed 's/^/    spec-connect: /'
+      printf '\n'
+      sleep 20
+    done
+    warn "  cs2 stayed on main menu after 4 reconnect attempts — viewers will see main menu (check server reachability + BACKSPACE bind + spec-server logs)"
+  ) >>"$LOG_DIR/connect-watchdog.log" 2>&1 &
+  log "  connect-watchdog started (background pid=$!) — see $LOG_DIR/connect-watchdog.log"
+fi
+
+# 6b. Pre-match map flythrough (5stack prod fork F4). Plays AFTER capture
+# is up so the flythrough is visible in the live HLS stream. mpv runs
+# fullscreen + ontop; ximagesrc captures the composite. Non-fatal: any
+# failure (no binding for map, mpv missing, hostPath empty) just falls
+# through and viewers see cs2's warmup state instead.
+say "6b. play map flythrough during warmup"
+play_flythrough || warn "  flythrough: non-fatal failure (see lines above)"
 
 say "done"
 log "watch:    https://${GAME_STREAM_DOMAIN}/${MATCH_ID}/"
