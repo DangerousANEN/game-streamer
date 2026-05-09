@@ -123,6 +123,119 @@ const gsiState = {
   teamTScore: 0,
 };
 
+// ── F3: round highlight detection ──────────────────────────────────
+// Track per-player kill totals from GSI allplayers.match_stats.kills.
+// On round_phase "live"→"over" we compute deltas (kills THIS round)
+// and flag highlights (2K/3K/4K/Ace). During freeze time, auto-spec
+// the round MVP and POST the highlight to the api for the panel.
+const highlightState = {
+  // Map<steamId, {kills, deaths, name, team}> snapshot taken at the
+  // START of each round (round_phase "freezetime"→"live" transition).
+  roundStartStats: new Map(),
+  // Array of detected highlights for the current match, most recent
+  // first. Capped at 200 entries.
+  highlights: [],
+  // Prevent double-firing on the same round.
+  lastProcessedRound: -1,
+};
+
+function snapshotRoundStartStats(allPlayers) {
+  highlightState.roundStartStats.clear();
+  if (!allPlayers || typeof allPlayers !== "object") return;
+  for (const [steamId, p] of Object.entries(allPlayers)) {
+    if (!p || typeof p !== "object") continue;
+    highlightState.roundStartStats.set(steamId, {
+      kills: Number(p.match_stats?.kills ?? 0),
+      deaths: Number(p.match_stats?.deaths ?? 0),
+      name: typeof p.name === "string" ? p.name : steamId,
+      team: p.team === "T" || p.team === "CT" ? p.team : null,
+    });
+  }
+}
+
+function detectRoundHighlights(roundNumber, allPlayers) {
+  if (!allPlayers || typeof allPlayers !== "object") return [];
+  if (highlightState.roundStartStats.size === 0) return [];
+
+  const detected = [];
+  const teamSize = {};
+  for (const [, p] of Object.entries(allPlayers)) {
+    if (!p || typeof p !== "object") continue;
+    const t = p.team;
+    if (t === "T" || t === "CT") teamSize[t] = (teamSize[t] ?? 0) + 1;
+  }
+
+  for (const [steamId, p] of Object.entries(allPlayers)) {
+    if (!p || typeof p !== "object") continue;
+    const prev = highlightState.roundStartStats.get(steamId);
+    if (!prev) continue;
+    const killsThisRound =
+      Number(p.match_stats?.kills ?? 0) - prev.kills;
+    if (killsThisRound < 2) continue;
+
+    const enemyTeam = prev.team === "CT" ? "T" : "CT";
+    const enemyCount = teamSize[enemyTeam] ?? 5;
+    const isAce = killsThisRound >= enemyCount;
+
+    let label;
+    if (isAce) label = "ace";
+    else if (killsThisRound >= 4) label = "4k";
+    else if (killsThisRound === 3) label = "3k";
+    else label = "2k";
+
+    detected.push({
+      round: roundNumber,
+      steam_id: steamId,
+      player_name: prev.name,
+      team: prev.team,
+      kills: killsThisRound,
+      label,
+      timestamp: new Date().toISOString(),
+    });
+  }
+  // Sort by kill count descending so the best highlight is first.
+  detected.sort((a, b) => b.kills - a.kills);
+  return detected;
+}
+
+async function postHighlightsToApi(highlights) {
+  const matchId = process.env.MATCH_ID;
+  const apiBase = process.env.STATUS_API_BASE ?? process.env.API_BASE;
+  if (!matchId || !apiBase || highlights.length === 0) return;
+  try {
+    await fetch(`${apiBase}/matches/${matchId}/highlights`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ highlights }),
+      signal: AbortSignal.timeout(5_000),
+    });
+  } catch (e) {
+    process.stderr.write(
+      `[spec-server] POST highlights failed: ${e.message}\n`,
+    );
+  }
+}
+
+async function autoSpecHighlightPlayer(highlights) {
+  // During freeze time, spec the round MVP so the camera is on them
+  // when the next round starts. Find their observer_slot and fire
+  // spec_player via xdotool key.
+  if (highlights.length === 0) return;
+  const mvpSteamId = highlights[0].steam_id;
+  const slot = gsiState.specSlots.find((s) => s.steam_id === mvpSteamId);
+  if (!slot) return;
+  const digitKey = slot.slot <= 9 ? String(slot.slot) : "0";
+  try {
+    await sendKey(digitKey);
+    process.stderr.write(
+      `[spec-server] highlights: auto-spec player ${highlights[0].player_name} (slot ${slot.slot})\n`,
+    );
+  } catch {
+    // Non-fatal: cs2 might not have focus, or the slot key isn't bound
+    // yet — just keep going so the next round still gets evaluated.
+  }
+}
+
 // One-shot "tell the api the demo is actually playing now" beacon
 // + hide the auto-opened demoui Panorama panel. Fires on the first
 // GSI receipt — that's the deterministic "demo loaded and rolling"
@@ -589,6 +702,15 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // F3: query in-memory highlights detected by GSI round tracking.
+    if (method === "GET" && url === "/highlights") {
+      sendJson(res, 200, {
+        highlights: highlightState.highlights,
+        last_processed_round: highlightState.lastProcessedRound,
+      });
+      return;
+    }
+
     if (method !== "POST") {
       sendJson(res, 404, { error: "not found" });
       log("-> 404");
@@ -943,6 +1065,43 @@ const server = createServer(async (req, res) => {
         slots.sort((a, b) => a.slot - b.slot);
         gsiState.specSlots = slots;
       }
+      // F3 highlight detection: anchor stats at the start of each round
+      // and detect multi-kills when the round ends. Both transitions
+      // need fresh allplayers from the current GSI tick (`body`).
+      if (
+        prevRoundPhase !== "live" &&
+        gsiState.roundPhase === "live" &&
+        allPlayers
+      ) {
+        snapshotRoundStartStats(allPlayers);
+      }
+      if (
+        prevRoundPhase === "live" &&
+        gsiState.roundPhase === "over" &&
+        allPlayers &&
+        gsiState.roundNumber !== highlightState.lastProcessedRound
+      ) {
+        const detected = detectRoundHighlights(
+          gsiState.roundNumber ?? -1,
+          allPlayers,
+        );
+        highlightState.lastProcessedRound = gsiState.roundNumber ?? -1;
+        if (detected.length > 0) {
+          highlightState.highlights = [
+            ...detected,
+            ...highlightState.highlights,
+          ].slice(0, 200);
+          log(
+            `  highlights round ${gsiState.roundNumber}: ` +
+              detected
+                .map((h) => `${h.label}(${h.player_name}/${h.kills}k)`)
+                .join(" "),
+          );
+          void postHighlightsToApi(detected);
+          void autoSpecHighlightPlayer(detected);
+        }
+      }
+
       bumpActivity();
       sendJson(res, 200, { ok: true });
       // Only fire the "playing" beacon once we have REAL game data.
