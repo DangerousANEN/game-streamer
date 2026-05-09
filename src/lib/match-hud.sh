@@ -42,8 +42,12 @@ slugify_hud() {
 # the zip from `GET /huds/<id>/download`. Both endpoints accept the
 # same auth bearer the streamer pod already uses for other api calls.
 seed_match_hud() {
-  if [ -z "${API_BASE:-}" ] || [ -z "${MATCH_ID:-}" ]; then
-    log "  match-hud: API_BASE / MATCH_ID missing — using bundled OpenHud"
+  # The api Job spec injects STATUS_API_BASE (defaults to http://api:5585
+  # in-cluster) for live/demo/batch streamers. Fall through to API_BASE for
+  # local-dev environments that still set the legacy variable.
+  local api_base="${STATUS_API_BASE:-${API_BASE:-}}"
+  if [ -z "$api_base" ] || [ -z "${MATCH_ID:-}" ]; then
+    log "  match-hud: STATUS_API_BASE / MATCH_ID missing — using bundled OpenHud"
     return 0
   fi
 
@@ -54,7 +58,7 @@ seed_match_hud() {
     headers+=(-H "authorization: Bearer ${API_TOKEN}")
   fi
 
-  local active_url="${API_BASE%/}/huds/active/${MATCH_ID}"
+  local active_url="${api_base%/}/huds/active/${MATCH_ID}"
   local active_json
   active_json=$(curl -fsS -m 5 "${headers[@]}" "$active_url" 2>/dev/null) || {
     log "  match-hud: no active HUD for $MATCH_ID (using bundled OpenHud)"
@@ -86,7 +90,7 @@ seed_match_hud() {
   # Walk the manifest the api wrote at upload time. The streamer fetches
   # each file individually from /huds/<slug>/files/<rel> — no archiver
   # dep on the api side, no zip-on-the-fly, just a plain http mirror.
-  local manifest_url="${API_BASE%/}/huds/${hud_slug}/manifest"
+  local manifest_url="${api_base%/}/huds/${hud_slug}/manifest"
   local manifest_json
   manifest_json=$(curl -fsS -m 10 "${headers[@]}" "$manifest_url" 2>/dev/null) || {
     warn "  match-hud: manifest fetch failed from $manifest_url"
@@ -111,7 +115,7 @@ seed_match_hud() {
     local out="$target/build/$rel"
     mkdir -p "$(dirname "$out")"
     if curl -fsS -m 30 "${headers[@]}" -o "$out" \
-       "${API_BASE%/}/huds/${hud_slug}/files/${rel}"; then
+       "${api_base%/}/huds/${hud_slug}/files/${rel}"; then
       count=$((count + 1))
     else
       fail=$((fail + 1))
@@ -131,11 +135,15 @@ seed_match_hud() {
 # Write the spec-server GSI cfg next to OpenHud's. cs2 picks up every
 # gamestate_integration_*.cfg in cfg/ at engine init.
 write_spec_gsi_cfg() {
-  local cfg_dir="${CS2_DIR:-/opt/instance/game}/csgo/cfg"
-  if [ ! -d "$cfg_dir" ]; then
-    warn "  spec-gsi: $cfg_dir doesn't exist yet — skipping (cs2 install pending)"
-    return 0
-  fi
+  # CS2 (post-Source-2 rename) keeps cfg under <CS2_DIR>/game/csgo/cfg,
+  # NOT <CS2_DIR>/csgo/cfg (the legacy CSGO layout). Mirror the path
+  # used by openhud.sh::write_openhud_gsi_cfg so both GSI consumers
+  # land in the same directory.
+  local cfg_dir="${CS2_DIR}/game/csgo/cfg"
+  # Steam may not have finished extracting yet on a freshly-warmed pod,
+  # so create the dir defensively rather than skipping silently — cs2
+  # picks up every gamestate_integration_*.cfg at engine init.
+  mkdir -p "$cfg_dir"
 
   local cfg_path="$cfg_dir/gamestate_integration_${SPEC_GSI_NAME}.cfg"
   cat > "$cfg_path" <<EOF

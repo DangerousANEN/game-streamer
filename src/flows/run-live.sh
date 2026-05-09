@@ -408,6 +408,51 @@ start_capture "$MATCH_ID" "$FPS" "$VIDEO_KBPS" false 1 \
 report_status status=live \
   "stream_url=${MEDIAMTX_SRT_BASE}?streamid=publish:${MATCH_ID}"
 
+# 6a. Reconnect-watchdog: if Steam dropped the +connect launch arg
+# (it occasionally does when -applaunch hands off to an already-running
+# Steam) cs2 sits at the main menu and viewers see the menu instead of
+# the game. We detect that by polling spec-server's GSI freshness (no
+# events => not in a game) and re-issuing the connect via the new
+# /spec/connect endpoint. Bounded retries so we don't spam an actual
+# server-down situation.
+if [ "$CS2_CONNECT_MODE" != "playcast" ]; then
+  (
+    SCRIPT_TAG=connect-watchdog
+    spec_port="${SPEC_SERVER_PORT:-1350}"
+    spec_url="http://127.0.0.1:${spec_port}"
+    # Give cs2 a generous head-start before second-guessing it — a
+    # cold cache + shader pre-cache can keep a fresh pod on the menu
+    # for ~25-40s even when +connect was honoured.
+    sleep 30
+    for attempt in 1 2 3 4; do
+      gsi_age=$(curl -fsS -m 3 "${spec_url}/demo/state" 2>/dev/null \
+        | python3 -c 'import json,sys
+try:
+  d = json.load(sys.stdin)
+  g = d.get("gsi") or {}
+  print(g.get("last_received_ms_ago", -1))
+except Exception:
+  print(-1)' 2>/dev/null) || gsi_age=-1
+      if [ "$gsi_age" != "-1" ] && [ "$gsi_age" -ge 0 ] 2>/dev/null \
+         && [ "$gsi_age" -lt 30000 ]; then
+        log "  gsi fresh (last_received_ms_ago=$gsi_age) — cs2 is in-game, no reconnect needed"
+        exit 0
+      fi
+      log "  cs2 GSI cold (gsi_age=$gsi_age, attempt=$attempt/4) — re-issuing connect ${CS2_CONNECT_ADDR}"
+      curl -fsS -m 5 -X POST -H 'content-type: application/json' \
+        --data "$(printf '{"addr":"%s","password":"%s"}' \
+          "$CS2_CONNECT_ADDR" "$CS2_CONNECT_PASSWORD")" \
+        "${spec_url}/spec/connect" \
+        | head -c 200 \
+        | sed 's/^/    spec-connect: /'
+      printf '\n'
+      sleep 20
+    done
+    warn "  gsi stayed cold after 4 reconnect attempts — viewers will see main menu (check server reachability + steam +connect handling)"
+  ) >>"$LOG_DIR/connect-watchdog.log" 2>&1 &
+  log "  connect-watchdog started (background pid=$!) — see $LOG_DIR/connect-watchdog.log"
+fi
+
 # 6b. Pre-match map flythrough (5stack prod fork F4). Plays AFTER capture
 # is up so the flythrough is visible in the live HLS stream. mpv runs
 # fullscreen + ontop; ximagesrc captures the composite. Non-fatal: any

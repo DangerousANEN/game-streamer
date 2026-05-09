@@ -729,6 +729,18 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // Parse the request body up-front for *all* POST handlers below so
+    // that no handler hits the temporal-dead-zone of a `let body` that
+    // is only declared further down in the same try-block.
+    let body;
+    try {
+      body = await readJsonBody(req);
+    } catch {
+      sendJson(res, 400, { error: "invalid json" });
+      log("-> 400 invalid json");
+      return;
+    }
+
     // F4: kick off a live spectator-camera flythrough using a map's
     // waypoint plan. The plan is loaded by name from
     // /opt/5stack/intros/<map>.cinematic.json (hostPath override) or
@@ -757,12 +769,46 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    let body;
-    try {
-      body = await readJsonBody(req);
-    } catch {
-      sendJson(res, 400, { error: "invalid json" });
-      log("-> 400 invalid json");
+    // F4-related fix: Steam occasionally drops the +connect launch
+    // arg when -applaunch hands off to an already-running Steam
+    // process; cs2 then sits at the main menu and the live stream
+    // shows the menu instead of the game. run-live.sh polls the GSI
+    // freshness in /demo/state and re-issues `connect <addr>` /
+    // `password <pwd>` through this endpoint when GSI stays cold for
+    // too long. Body: { "addr": "1.2.3.4:27015", "password": "..." }.
+    if (url === "/spec/connect") {
+      const addr = typeof body?.addr === "string" ? body.addr.trim() : "";
+      const password =
+        typeof body?.password === "string" ? body.password : "";
+      // Match cs2's `<host>:<port>` form. Reject anything else so a
+      // typo doesn't leak shell-meta into execCfgCommand.
+      if (!/^[A-Za-z0-9.\-]+:\d{1,5}$/.test(addr)) {
+        sendJson(res, 400, { error: "addr (host:port) required" });
+        log("-> 400 connect bad addr");
+        return;
+      }
+      const cmds = [];
+      if (password) {
+        // Drop quotes — cs2's parser doesn't quote inside cfg `exec`,
+        // and our match passwords are uuids so they have none anyway.
+        cmds.push(`password ${password.replace(/[\r\n";]/g, "")}`);
+      }
+      cmds.push(`connect ${addr}`);
+      let ok = true;
+      for (const cmd of cmds) {
+        // Sequential: connect must follow the password on cs2's
+        // command queue so the server accepts the join.
+        if (!(await execCfgCommand(cmd))) {
+          ok = false;
+          break;
+        }
+      }
+      sendJson(
+        res,
+        ok ? 200 : 503,
+        ok ? { ok, addr } : { error: "cs2 not running" },
+      );
+      log(`-> ${ok ? 200 : 503} connect ${addr}`);
       return;
     }
 
