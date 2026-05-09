@@ -7,6 +7,10 @@ on:
       - "devin/**"
   workflow_dispatch:
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   build-push-and-release:
     runs-on: ubuntu-latest
