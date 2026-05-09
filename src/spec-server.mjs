@@ -126,7 +126,25 @@ const gsiState = {
   teamTName: null,
   teamCtScore: 0,
   teamTScore: 0,
+  // Phase countdown info from GSI's `phase_countdowns` block. Used by
+  // the OBS operator-view HUD to render a round-start / freeze /
+  // bomb-detonation / defuse countdown without re-decoding the demo.
+  // Shape: { phase: "freezetime"|"live"|"over"|null, phase_ends_in_s: number|null }
+  phase: null,
+  phaseEndsInS: null,
+  // Bomb state (planted/defusing) — exposed for HUDs that draw a
+  // dedicated bomb timer. Mirrors GSI's `bomb` block.
+  // Shape: { state: "planted"|"defusing"|null, countdown_s: number|null }
+  bombState: null,
+  bombCountdownS: null,
 };
+
+// Per-player snapshot enriched from `allplayers[*].state` for the
+// operator-view HUD (money, equip_value, kills/deaths/per-round). Held
+// separately from `specSlots` so the existing keyboard/click pathway
+// (which only cares about slot+steam_id+team+alive) doesn't pay the
+// extra serialization cost. Resets every GSI tick.
+let specPlayersExt = [];
 
 // ── F3: round highlight detection ──────────────────────────────────
 // Track per-player kill totals from GSI allplayers.match_stats.kills.
@@ -692,10 +710,15 @@ const server = createServer(async (req, res) => {
               spectated_steam_id: gsiState.spectatedSteamId,
               last_received_ms_ago: Date.now() - gsiState.lastReceivedMs,
               spec_slots: gsiState.specSlots,
+              spec_players_ext: specPlayersExt,
               team_ct_name: gsiState.teamCtName,
               team_t_name: gsiState.teamTName,
               team_ct_score: gsiState.teamCtScore,
               team_t_score: gsiState.teamTScore,
+              phase: gsiState.phase,
+              phase_ends_in_s: gsiState.phaseEndsInS,
+              bomb_state: gsiState.bombState,
+              bomb_countdown_s: gsiState.bombCountdownS,
               // True once the post-GSI demoui-toggle has been
               // delivered to cs2. The batch-highlights pod waits on
               // this before starting its first capture so we don't
@@ -1121,6 +1144,28 @@ const server = createServer(async (req, res) => {
         typeof map?.team_t?.name === "string" ? map.team_t.name : null;
       gsiState.teamCtScore = Number(map?.team_ct?.score ?? 0) || 0;
       gsiState.teamTScore = Number(map?.team_t?.score ?? 0) || 0;
+      // Phase + countdown for OBS operator-view HUD.
+      const pc = body?.phase_countdowns ?? null;
+      gsiState.phase =
+        typeof pc?.phase === "string" ? pc.phase : null;
+      const phaseEndsRaw = pc?.phase_ends_in;
+      gsiState.phaseEndsInS =
+        typeof phaseEndsRaw === "string"
+          ? Number.parseFloat(phaseEndsRaw) || 0
+          : typeof phaseEndsRaw === "number"
+            ? phaseEndsRaw
+            : null;
+      // Bomb state — string fields per cs2 GSI.
+      const bomb = body?.bomb ?? null;
+      gsiState.bombState =
+        typeof bomb?.state === "string" ? bomb.state : null;
+      const bombCountdownRaw = bomb?.countdown;
+      gsiState.bombCountdownS =
+        typeof bombCountdownRaw === "string"
+          ? Number.parseFloat(bombCountdownRaw) || 0
+          : typeof bombCountdownRaw === "number"
+            ? bombCountdownRaw
+            : null;
       // Build the slot snapshot. `allplayers` is keyed by steamid64 and
       // each entry has `observer_slot` — in CS2 GSI this is 0-indexed,
       // i.e. the player on key "1" reports observer_slot=0, key "2"
@@ -1129,6 +1174,7 @@ const server = createServer(async (req, res) => {
       // simply add 1 to land on the 1..10 numbering the buttons fire.
       if (allPlayers && typeof allPlayers === "object") {
         const slots = [];
+        const ext = [];
         for (const [steamId, p] of Object.entries(allPlayers)) {
           if (!p || typeof p !== "object") continue;
           const raw = p.observer_slot;
@@ -1136,7 +1182,8 @@ const server = createServer(async (req, res) => {
           const slot = raw + 1;
           if (slot < 1 || slot > 12) continue;
           const team = p.team === "T" || p.team === "CT" ? p.team : null;
-          const health = Number(p.state?.health ?? 0);
+          const state = p.state ?? {};
+          const health = Number(state.health ?? 0);
           slots.push({
             slot,
             steam_id: steamId,
@@ -1145,9 +1192,54 @@ const server = createServer(async (req, res) => {
             alive: health > 0,
             health,
           });
+          // weapons[*] = { name, paintkit, type, state, ammo_clip,... }
+          // We extract just the weapon names + the "active" weapon for
+          // the operator HUD; ammo and paintkit aren't useful overlay
+          // data (and bloat the JSON).
+          const weapons = [];
+          let activeWeapon = null;
+          if (p.weapons && typeof p.weapons === "object") {
+            for (const wRaw of Object.values(p.weapons)) {
+              if (!wRaw || typeof wRaw !== "object") continue;
+              const wName =
+                typeof wRaw.name === "string" ? wRaw.name : null;
+              if (!wName) continue;
+              const wType =
+                typeof wRaw.type === "string" ? wRaw.type : null;
+              weapons.push({ name: wName, type: wType });
+              if (wRaw.state === "active") {
+                activeWeapon = wName;
+              }
+            }
+          }
+          const matchStats = p.match_stats ?? {};
+          ext.push({
+            slot,
+            steam_id: steamId,
+            name: typeof p.name === "string" ? p.name : null,
+            team,
+            alive: health > 0,
+            health,
+            armor: Number(state.armor ?? 0),
+            helmet: !!state.helmet,
+            money: Number(state.money ?? 0),
+            equip_value: Number(state.equip_value ?? 0),
+            round_kills: Number(state.round_kills ?? 0),
+            round_killhs: Number(state.round_killhs ?? 0),
+            kills: Number(matchStats.kills ?? 0),
+            assists: Number(matchStats.assists ?? 0),
+            deaths: Number(matchStats.deaths ?? 0),
+            mvps: Number(matchStats.mvps ?? 0),
+            score: Number(matchStats.score ?? 0),
+            weapons,
+            active_weapon: activeWeapon,
+            defusekit: !!state.defusekit,
+          });
         }
         slots.sort((a, b) => a.slot - b.slot);
+        ext.sort((a, b) => a.slot - b.slot);
         gsiState.specSlots = slots;
+        specPlayersExt = ext;
       }
       // F3 highlight detection: anchor stats at the start of each round
       // and detect multi-kills when the round ends. Both transitions
