@@ -222,7 +222,11 @@ write_spec_player_binds \
 # +exec live_autoexec from the launch args picks up the same binds.
 # 3d. Pull per-match HUD pack + write spec-server GSI cfg (5stack prod fork)
 say "3d. seed match HUD + spec-server GSI cfg"
-seed_match_hud || warn "  match-hud: non-fatal failure (see lines above)"
+if [ "${OPENHUD_DISABLED:-0}" = "1" ]; then
+  log "  match-hud: OPENHUD_DISABLED=1 — skipping HUD pack download"
+else
+  seed_match_hud || warn "  match-hud: non-fatal failure (see lines above)"
+fi
 write_spec_gsi_cfg
 
 cp "$CS2_CFG_DIR/autoexec.cfg" "$CS2_CFG_DIR/live_autoexec.cfg"
